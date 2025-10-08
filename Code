@@ -1,3 +1,4 @@
+
 ' LoadClipSection.vbs — populate Micro, Comment, then Diagnosis for a given ID
 Option Explicit
 
@@ -5,7 +6,10 @@ Option Explicit
 Const DO_PASTE                   = True
 Const SCRUB_AFTER_PASTE          = True
 Const DO_TRIM                    = True      ' trim leading/trailing blank lines
-Const TARGET_WINDOW_TITLE        = "Epic Hyperspace"
+
+' Activation targets
+Const TARGET_WINDOW_TITLE        = "Result Entry -- Webpage Dialog"  ' prefix match
+Const ALT_TARGET_REGEX           = "^PathQuest.+- Work - Microsoft.*" ' regex match
 
 ' Timing
 Const WAIT_AFTER_OPEN_BOX_MS     = 200
@@ -18,22 +22,22 @@ Const WAIT_BETWEEN_SECTIONS_MS   = 120
 Const DEBUG_FLAG                 = False
 
 ' Alerts / guidance
-Const ALERT_ONEDRIVE_MISSING     = True      ' message if OneDrive folder/file not found
-Const ALERT_CLOUD_COPY_FAILED    = True      ' message if copy fails (likely cloud-only/locked)
-Const CLOUD_COPY_ALERT_COOLDOWN_MIN = 1440   ' show copy-fail message at most once per day
-Const OFFER_OPEN_FOLDER_ON_FAIL  = True      ' open Explorer on failure to let user pin folder
+Const ALERT_ONEDRIVE_MISSING     = True
+Const ALERT_CLOUD_COPY_FAILED    = True
+Const CLOUD_COPY_ALERT_COOLDOWN_MIN = 1440
+Const OFFER_OPEN_FOLDER_ON_FAIL  = True
 
 ' Bootstrap (only when a LOCAL cache exists)
-Const SEED_TO_ONEDRIVE_IF_MISSING = True     ' create folder/file in OneDrive from LOCAL cache
-Const ALERT_ONEDRIVE_SEEDED       = True     ' notify when we seed the template
-Const OFFER_OPEN_FOLDER_ON_SEED   = True     ' open Explorer to the folder after seeding
+Const SEED_TO_ONEDRIVE_IF_MISSING = True
+Const ALERT_ONEDRIVE_SEEDED       = True
+Const OFFER_OPEN_FOLDER_ON_SEED   = True
 
 ' --- Activation + debug ---
-Const REQUIRE_ACTIVATE           = True   ' stop if we can't activate the target
-Const ACTIVATE_TIMEOUT_MS        = 2000   ' try for up to 2 seconds
-Const ACTIVATE_RETRY_INTERVAL_MS = 100    ' retry every 100 ms
-Const ACTIVATE_ALT_NUDGE         = True   ' send lone ALT to allow foreground switch
-Const DEBUG_SHOW_ACTIVE_TITLE    = True   ' show current active window title at start
+Const REQUIRE_ACTIVATE           = True      ' stop if neither target can be activated
+Const ACTIVATE_TIMEOUT_MS        = 2000
+Const ACTIVATE_RETRY_INTERVAL_MS = 100
+Const ACTIVATE_ALT_NUDGE         = True
+Const DEBUG_SHOW_ACTIVE_TITLE    = False     ' set True temporarily to see current active title
 '================================================
 
 Dim args: Set args = WScript.Arguments
@@ -42,6 +46,9 @@ Dim id4: id4 = Pad4(args(0))
 
 Dim ws:  Set ws  = CreateObject("WScript.Shell")
 Dim fso: Set fso = CreateObject("Scripting.FileSystemObject")
+
+' Global for per-run behavior (skip Tab on PathQuest window)
+Dim SKIP_TAB_THIS_RUN: SKIP_TAB_THIS_RUN = False
 
 ' ===== Resolve & cache template (OneDrive Business ↔ LOCALAPPDATA cache) =====
 Dim TEMPLATE_PATH: TEMPLATE_PATH = EnsureLocalTemplate()
@@ -58,11 +65,7 @@ End Sub
 
 Function Pad4(x)
   Dim s: s = Trim(CStr(x))
-  If Len(s) < 4 Then
-    s = Right("0000" & s, 4)
-  Else
-    s = Right(s, 4)
-  End If
+  If Len(s) < 4 Then s = Right("0000" & s, 4) Else s = Right(s, 4)
   Pad4 = s
 End Function
 
@@ -84,12 +87,6 @@ Sub WriteAllUtf8(p, s)
   st.Close
 End Sub
 
-Sub EnsureFileExistsEmpty(p)
-  If Not fso.FileExists(p) Then
-    WriteAllUtf8 p, ""
-  End If
-End Sub
-
 Sub SetClipboardText(s)
   If IsNull(s) Then s = ""
   Dim tf, cmd
@@ -97,9 +94,7 @@ Sub SetClipboardText(s)
   WriteAllUtf8 tf, s
   cmd = "%ComSpec% /c chcp 65001>nul & type """ & tf & """ | clip"
   ws.Run cmd, 0, True
-  On Error Resume Next
-  fso.DeleteFile tf, True
-  On Error GoTo 0
+  On Error Resume Next: fso.DeleteFile tf, True: On Error GoTo 0
 End Sub
 
 Function TrimCRLF(s)
@@ -132,7 +127,7 @@ Sub Fail(msg)
   WScript.Quit 2
 End Sub
 
-' --- Debug: get the CURRENT active window title (hidden PowerShell) ---
+' --- Debug: get CURRENT active window title (hidden PowerShell) ---
 Function GetActiveWindowTitle()
   On Error Resume Next
   Dim tf, ps, ex, out
@@ -156,9 +151,53 @@ Function GetActiveWindowTitle()
   Set ex = ws.Exec("powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & tf & """")
   out = ex.StdOut.ReadAll
   GetActiveWindowTitle = Trim(out)
-  On Error Resume Next
-  fso.DeleteFile tf, True
-  On Error GoTo 0
+  On Error Resume Next: fso.DeleteFile tf, True: On Error GoTo 0
+End Function
+
+' --- Find a window whose title matches a regex (case-insensitive), return exact title ---
+Function FindWindowTitleByRegex(ByVal pattern, ByVal timeoutMs)
+  Dim deadline: deadline = DateAdd("s", timeoutMs/1000, Now)
+  Dim tf, ps, ex, out, patt
+  patt = Replace(pattern, """", """""") ' escape quotes for PS
+  tf = fso.BuildPath(ws.ExpandEnvironmentStrings("%TEMP%"), "find_window_by_regex.ps1")
+  ps = "$code = @'" & vbCrLf & _
+       "using System;" & vbCrLf & _
+       "using System.Text;" & vbCrLf & _
+       "using System.Collections.Generic;" & vbCrLf & _
+       "using System.Runtime.InteropServices;" & vbCrLf & _
+       "public static class WinEnum {" & vbCrLf & _
+       " public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);" & vbCrLf & _
+       " [DllImport(""user32.dll"")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);" & vbCrLf & _
+       " [DllImport(""user32.dll"")] public static extern bool IsWindowVisible(IntPtr hWnd);" & vbCrLf & _
+       " [DllImport(""user32.dll"", CharSet=CharSet.Auto, SetLastError=true)]" & vbCrLf & _
+       " public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int maxCount);" & vbCrLf & _
+       "}" & vbCrLf & _
+       "'@" & vbCrLf & _
+       "Add-Type -TypeDefinition $code" & vbCrLf & _
+       "$r = New-Object System.Collections.Generic.List[string]" & vbCrLf & _
+       "[WinEnum]::EnumWindows({ param($h,$l)" & vbCrLf & _
+       " if([WinEnum]::IsWindowVisible($h)){" & vbCrLf & _
+       "  $sb=New-Object System.Text.StringBuilder 2048" & vbCrLf & _
+       "  [WinEnum]::GetWindowText($h,$sb,$sb.Capacity) | Out-Null" & vbCrLf & _
+       "  $t=$sb.ToString()" & vbCrLf & _
+       "  if($t -match """ & patt & """){ $r.Add($t) }" & vbCrLf & _
+       " }" & vbCrLf & _
+       " $true }, [IntPtr]::Zero) | Out-Null" & vbCrLf & _
+       "if($r.Count -gt 0){ $r[0] }"
+  WriteAllUtf8 tf, ps
+
+  Do
+    Set ex = ws.Exec("powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & tf & """")
+    out = Trim(ex.StdOut.ReadAll)
+    If Len(out) > 0 Then
+      FindWindowTitleByRegex = out
+      Exit Function
+    End If
+    WScript.Sleep ACTIVATE_RETRY_INTERVAL_MS
+  Loop While Now < deadline
+
+  FindWindowTitleByRegex = ""
+  On Error Resume Next: fso.DeleteFile tf, True: On Error GoTo 0
 End Function
 
 ' --- Try to activate a window by (prefix) title with retries ---
@@ -176,10 +215,7 @@ Function TryActivateWindow(ByVal title, ByVal timeoutMs)
 End Function
 
 Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
-  If Len(textToPaste) = 0 Then
-    D "Skip " & label & " — no snippet for " & id4
-    Exit Sub
-  End If
+  If Len(textToPaste) = 0 Then D "Skip " & label & " — no snippet for " & id4 : Exit Sub
 
   ws.SendKeys "%n"                                ' Alt+N
   WScript.Sleep WAIT_AFTER_OPEN_BOX_MS
@@ -187,8 +223,11 @@ Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
   WScript.Sleep WAIT_AFTER_TYPE_LABEL_MS
   ws.SendKeys "{ENTER}"
   WScript.Sleep WAIT_AFTER_ENTER_MS
-  ws.SendKeys "{TAB}"
-  WScript.Sleep WAIT_AFTER_TAB_MS
+
+  If Not SKIP_TAB_THIS_RUN Then
+    ws.SendKeys "{TAB}"
+    WScript.Sleep WAIT_AFTER_TAB_MS
+  End If
 
   SetClipboardText textToPaste
   If FALLBACK_FIXED_WAIT_MS > 0 Then WScript.Sleep FALLBACK_FIXED_WAIT_MS
@@ -211,29 +250,20 @@ Function EnsureLocalTemplate()
   Dim localRoot, cacheDir, cachePath
   localRoot = ws.ExpandEnvironmentStrings("%LOCALAPPDATA%")
   cacheDir  = localRoot & "\JSS_SplitterWithoutAvocado"
-  If Not fso.FolderExists(cacheDir) Then
-    On Error Resume Next
-    fso.CreateFolder cacheDir
-    On Error GoTo 0
-  End If
+  If Not fso.FolderExists(cacheDir) Then On Error Resume Next: fso.CreateFolder cacheDir: On Error GoTo 0
   cachePath = cacheDir & "\SplitterTemplates_WithoutAvocado.txt"
 
   ' Resolve OneDrive for Business root
-  Dim odBizRoot
-  odBizRoot = ws.ExpandEnvironmentStrings("%OneDriveCommercial%")
+  Dim odBizRoot: odBizRoot = ws.ExpandEnvironmentStrings("%OneDriveCommercial%")
 
   ' If OneDrive is not available:
   If Len(odBizRoot) = 0 Or InStr(odBizRoot, "%OneDriveCommercial%") > 0 Then
     If fso.FileExists(cachePath) Then
-      If ALERT_ONEDRIVE_MISSING Then _
-        MsgBox "OneDrive for Business is not available for this profile." & vbCrLf & _
-               "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
+      If ALERT_ONEDRIVE_MISSING Then MsgBox "OneDrive for Business is not available for this profile." & vbCrLf & "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
       EnsureLocalTemplate = cachePath
       Exit Function
     Else
-      Fail "Template not found locally and OneDrive is unavailable." & vbCrLf & _
-           "Please install your template at:" & vbCrLf & _
-           cachePath
+      Fail "Template not found locally and OneDrive is unavailable." & vbCrLf & "Please install your template at:" & vbCrLf & cachePath
     End If
   End If
 
@@ -245,26 +275,15 @@ Function EnsureLocalTemplate()
   ' If local cache exists but cloud folder/file is missing → seed cloud from LOCAL
   If fso.FileExists(cachePath) Then
     If Not fso.FolderExists(oneDocsDir) Then
-      If SEED_TO_ONEDRIVE_IF_MISSING Then
-        On Error Resume Next
-        fso.CreateFolder oneDocsDir
-        On Error GoTo 0
-      End If
+      If SEED_TO_ONEDRIVE_IF_MISSING Then On Error Resume Next: fso.CreateFolder oneDocsDir: On Error GoTo 0
     End If
-
     If fso.FolderExists(oneDocsDir) And Not fso.FileExists(cloudPath) Then
       If SEED_TO_ONEDRIVE_IF_MISSING Then
         On Error Resume Next
         fso.CopyFile cachePath, cloudPath, True
         If Err.Number = 0 Then
-          If ALERT_ONEDRIVE_SEEDED Then
-            MsgBox "Template was created in OneDrive at:" & vbCrLf & cloudPath & vbCrLf & _
-                   "You can edit your template there going forward.", _
-                   vbInformation, "LoadClipSection"
-          End If
-          If OFFER_OPEN_FOLDER_ON_SEED Then
-            ws.Run "explorer.exe """ & oneDocsDir & """", 1, False
-          End If
+          If ALERT_ONEDRIVE_SEEDED Then MsgBox "Template was created in OneDrive at:" & vbCrLf & cloudPath & vbCrLf & "You can edit your template there going forward.", vbInformation, "LoadClipSection"
+          If OFFER_OPEN_FOLDER_ON_SEED Then ws.Run "explorer.exe """ & oneDocsDir & """", 1, False
         Else
           Err.Clear
         End If
@@ -273,16 +292,13 @@ Function EnsureLocalTemplate()
     End If
   End If
 
-  ' Normal path: if cloud has a file, and it's newer than cache → copy down (hydrate if needed)
+  ' Normal path: copy down if cloud newer
   If fso.FileExists(cloudPath) Then
-    Dim doCopy
-    doCopy = False
+    Dim doCopy: doCopy = False
     If Not fso.FileExists(cachePath) Then
       doCopy = True
     Else
-      Dim fl, fc
-      Set fl = fso.GetFile(cachePath)
-      Set fc = fso.GetFile(cloudPath)
+      Dim fl, fc: Set fl = fso.GetFile(cachePath): Set fc = fso.GetFile(cloudPath)
       If fc.DateLastModified > fl.DateLastModified Then doCopy = True
     End If
 
@@ -290,38 +306,22 @@ Function EnsureLocalTemplate()
       On Error Resume Next
       fso.CopyFile cloudPath, cachePath, True
       If Err.Number <> 0 Then
-        ' cooldown: warn at most once per period; if no cache afterward → fail hard
-        Dim sidecar, showAlert
-        showAlert = True
+        Dim sidecar, showAlert: showAlert = True
         sidecar = cacheDir & "\.lastcopyfail"
         If fso.FileExists(sidecar) Then
-          Dim scf
-          Set scf = fso.GetFile(sidecar)
-          If DateDiff("n", scf.DateLastModified, Now) < CLOUD_COPY_ALERT_COOLDOWN_MIN Then
-            showAlert = False
-          End If
+          Dim scf: Set scf = fso.GetFile(sidecar)
+          If DateDiff("n", scf.DateLastModified, Now) < CLOUD_COPY_ALERT_COOLDOWN_MIN Then showAlert = False
         End If
-        Dim ts
-        Set ts = fso.OpenTextFile(sidecar, 2, True)
-        ts.Write "fail"
-        ts.Close
+        Dim ts: Set ts = fso.OpenTextFile(sidecar, 2, True): ts.Write "fail": ts.Close
 
         If ALERT_CLOUD_COPY_FAILED And showAlert Then
-          MsgBox "Could not copy updated template from OneDrive (likely cloud-only or locked):" & vbCrLf & _
-                 cloudPath & vbCrLf & vbCrLf & _
+          MsgBox "Could not copy updated template from OneDrive (likely cloud-only or locked):" & vbCrLf & cloudPath & vbCrLf & vbCrLf & _
                  "Tip: Right-click the folder and choose 'Always keep on this device' so it's always local." & vbCrLf & _
                  "Continuing with cached template if available.", vbInformation, "LoadClipSection"
-          If OFFER_OPEN_FOLDER_ON_FAIL Then
-            ws.Run "explorer.exe """ & oneDocsDir & """", 1, False
-          End If
+          If OFFER_OPEN_FOLDER_ON_FAIL Then ws.Run "explorer.exe """ & oneDocsDir & """", 1, False
         End If
         Err.Clear
-
-        ' If we still don't have any local template, we must stop
-        If Not fso.FileExists(cachePath) Then
-          Fail "Could not retrieve a template from OneDrive and no local template exists." & vbCrLf & _
-               "Please install your template at:" & vbCrLf & cachePath
-        End If
+        If Not fso.FileExists(cachePath) Then Fail "Could not retrieve a template from OneDrive and no local template exists." & vbCrLf & "Please install your template at:" & vbCrLf & cachePath
       End If
       On Error GoTo 0
     End If
@@ -334,41 +334,44 @@ Function EnsureLocalTemplate()
   If fso.FileExists(cachePath) Then
     EnsureLocalTemplate = cachePath
   Else
-    Fail "Template not found in OneDrive and no local template exists." & vbCrLf & _
-         "Please install your template at:" & vbCrLf & _
-         cachePath & vbCrLf & _
-         "After that, this script will seed OneDrive automatically."
+    Fail "Template not found in OneDrive and no local template exists." & vbCrLf & "Please install your template at:" & vbCrLf & cachePath & vbCrLf & "After that, this script will seed OneDrive automatically."
   End If
 End Function
 ' -------------------------------------------------------------------------------
 
-'-------------------- Main --------------------
-' Optional debug: show what window currently has focus (helps you find the right title prefix)
+'-------------------- Activation --------------------
 If DEBUG_SHOW_ACTIVE_TITLE Then
-  Dim awt, dbgMsg
-  awt = GetActiveWindowTitle()
-  If Len(awt) = 0 Then
-    dbgMsg = "Active window title is:" & vbCrLf & "(unknown / PowerShell blocked)"
-  Else
-    dbgMsg = "Active window title is:" & vbCrLf & """" & awt & """"
-  End If
-  MsgBox dbgMsg, vbInformation, "LoadClipSection — Debug"
+  Dim awt: awt = GetActiveWindowTitle()
+  MsgBox "Active window title is:" & vbCrLf & IIf(Len(awt)=0, "(unknown / PowerShell blocked)", """" & awt & """"), vbInformation, "LoadClipSection — Debug"
 End If
 
+Dim activated: activated = False
+
+' Try primary (exact/prefix) target first
 If Len(TARGET_WINDOW_TITLE) > 0 Then
-  If Not TryActivateWindow(TARGET_WINDOW_TITLE, ACTIVATE_TIMEOUT_MS) Then
-    If REQUIRE_ACTIVATE Then
-      MsgBox "Couldn't activate a window whose title begins with:" & vbCrLf & _
-             """" & TARGET_WINDOW_TITLE & """" & vbCrLf & vbCrLf & _
-             "Tip: Use a stable prefix of the parent window (e.g., the EMR app name), " & _
-             "not text inside a modal web dialog.", vbExclamation, "LoadClipSection"
-      WScript.Quit 3
-    End If
-  Else
-    WScript.Sleep 100
+  activated = TryActivateWindow(TARGET_WINDOW_TITLE, ACTIVATE_TIMEOUT_MS)
+End If
+
+' If that failed, try regex target and skip Tab if we match it
+If Not activated And Len(ALT_TARGET_REGEX) > 0 Then
+  Dim matchTitle: matchTitle = FindWindowTitleByRegex(ALT_TARGET_REGEX, ACTIVATE_TIMEOUT_MS)
+  If Len(matchTitle) > 0 Then
+    activated = ws.AppActivate(matchTitle)
+    If activated Then SKIP_TAB_THIS_RUN = True
   End If
 End If
 
+If Not activated And REQUIRE_ACTIVATE Then
+  MsgBox "Couldn't activate either target window." & vbCrLf & _
+         "Primary (prefix): " & TARGET_WINDOW_TITLE & vbCrLf & _
+         "Alternate (regex): " & ALT_TARGET_REGEX & vbCrLf & vbCrLf & _
+         "Bring the correct window to the front and run again.", vbExclamation, "LoadClipSection"
+  WScript.Quit 3
+End If
+
+If activated Then WScript.Sleep 100
+
+'-------------------- Main --------------------
 Dim content: content = ReadAllUtf8(TEMPLATE_PATH)
 
 Dim snMicro, snComment, snDx
