@@ -31,10 +31,10 @@ Dim id4: id4 = Pad4(args(0))
 Dim ws:  Set ws  = CreateObject("WScript.Shell")
 Dim fso: Set fso = CreateObject("Scripting.FileSystemObject")
 
-' ===== Resolve & cache template (OneDrive for Business → local cache) =====
+' ===== Resolve & cache template (OneDrive for Business → LOCALAPPDATA cache) =====
 Dim TEMPLATE_PATH: TEMPLATE_PATH = EnsureLocalTemplate()
 If Not fso.FileExists(TEMPLATE_PATH) Then Fail "Template not found: " & TEMPLATE_PATH
-' ==========================================================================
+' ================================================================================
 
 '-------------------- Helpers --------------------
 Sub D(s) : If DEBUG_FLAG Then MsgBox s, vbInformation, "LoadClipSection" : End If : End Sub
@@ -145,11 +145,11 @@ Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
   If WAIT_BETWEEN_SECTIONS_MS > 0 Then WScript.Sleep WAIT_BETWEEN_SECTIONS_MS
 End Sub
 
-' ----- OneDriveBusiness → local cache (copy if cloud newer) + alerts/cooldown -----
+' ----- OneDriveBusiness → LOCALAPPDATA cache (copy if cloud newer) + alerts/cooldown -----
 Function EnsureLocalTemplate()
-  Dim appData, cacheDir, cachePath
-  appData  = ws.ExpandEnvironmentStrings("%APPDATA%")
-  cacheDir = appData & "\JSS_SplitterWithoutAvocado"
+  Dim localRoot, cacheDir, cachePath
+  localRoot = ws.ExpandEnvironmentStrings("%LOCALAPPDATA%")
+  cacheDir  = localRoot & "\JSS_SplitterWithoutAvocado"
   If Not fso.FolderExists(cacheDir) Then
     On Error Resume Next
     fso.CreateFolder cacheDir
