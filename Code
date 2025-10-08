@@ -22,6 +22,11 @@ Const ALERT_ONEDRIVE_MISSING     = True      ' message if OneDrive folder/file n
 Const ALERT_CLOUD_COPY_FAILED    = True      ' message if copy fails (likely cloud-only/locked)
 Const CLOUD_COPY_ALERT_COOLDOWN_MIN = 1440   ' show copy-fail message at most once per day
 Const OFFER_OPEN_FOLDER_ON_FAIL  = True      ' open Explorer on failure to let user pin folder
+
+' Bootstrap (only when a LOCAL cache exists)
+Const SEED_TO_ONEDRIVE_IF_MISSING = True     ' create folder/file in OneDrive from LOCAL cache
+Const ALERT_ONEDRIVE_SEEDED       = True     ' notify when we seed the template
+Const OFFER_OPEN_FOLDER_ON_SEED   = True     ' open Explorer to the folder after seeding
 '================================================
 
 Dim args: Set args = WScript.Arguments
@@ -31,10 +36,10 @@ Dim id4: id4 = Pad4(args(0))
 Dim ws:  Set ws  = CreateObject("WScript.Shell")
 Dim fso: Set fso = CreateObject("Scripting.FileSystemObject")
 
-' ===== Resolve & cache template (OneDrive for Business → LOCALAPPDATA cache) =====
+' ===== Resolve & cache template (OneDrive Business ↔ LOCALAPPDATA cache) =====
 Dim TEMPLATE_PATH: TEMPLATE_PATH = EnsureLocalTemplate()
 If Not fso.FileExists(TEMPLATE_PATH) Then Fail "Template not found: " & TEMPLATE_PATH
-' ================================================================================
+' ============================================================================
 
 '-------------------- Helpers --------------------
 Sub D(s) : If DEBUG_FLAG Then MsgBox s, vbInformation, "LoadClipSection" : End If : End Sub
@@ -145,7 +150,7 @@ Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
   If WAIT_BETWEEN_SECTIONS_MS > 0 Then WScript.Sleep WAIT_BETWEEN_SECTIONS_MS
 End Sub
 
-' ----- OneDriveBusiness → LOCALAPPDATA cache (copy if cloud newer) + alerts/cooldown -----
+' ----- OneDrive Business ↔ LOCALAPPDATA cache (copy if cloud newer; seed if LOCAL exists) -----
 Function EnsureLocalTemplate()
   Dim localRoot, cacheDir, cachePath
   localRoot = ws.ExpandEnvironmentStrings("%LOCALAPPDATA%")
@@ -161,29 +166,58 @@ Function EnsureLocalTemplate()
   Dim odBizRoot
   odBizRoot = ws.ExpandEnvironmentStrings("%OneDriveCommercial%")
 
-  ' Treat missing/unevaluated env var as unavailable
+  ' If OneDrive is not available:
   If Len(odBizRoot) = 0 Or InStr(odBizRoot, "%OneDriveCommercial%") > 0 Then
-    If ALERT_ONEDRIVE_MISSING Then _
-      MsgBox "OneDrive for Business is not available for this profile." & vbCrLf & _
-             "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
-    EnsureLocalTemplate = cachePath
-    Exit Function
+    If fso.FileExists(cachePath) Then
+      If ALERT_ONEDRIVE_MISSING Then _
+        MsgBox "OneDrive for Business is not available for this profile." & vbCrLf & _
+               "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
+      EnsureLocalTemplate = cachePath
+      Exit Function
+    Else
+      Fail "Template not found locally and OneDrive is unavailable." & vbCrLf & _
+           "Please install your template at:" & vbCrLf & _
+           cachePath
+    End If
   End If
 
-  ' Expected Documents\JSS_SplitterWithoutAvocado under the OneDrive business root
-  Dim oneDocsDir
+  ' Expected OneDrive folder/file
+  Dim oneDocsDir, cloudPath
   oneDocsDir = odBizRoot & "\Documents\JSS_SplitterWithoutAvocado"
-  If Not fso.FolderExists(oneDocsDir) Then
-    If ALERT_ONEDRIVE_MISSING Then _
-      MsgBox "Expected template folder not found:" & vbCrLf & oneDocsDir & vbCrLf & _
-             "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
-    EnsureLocalTemplate = cachePath
-    Exit Function
+  cloudPath  = oneDocsDir & "\SplitterTemplates_WithoutAvocado.txt"
+
+  ' If local cache exists but cloud folder/file is missing → seed cloud from LOCAL
+  If fso.FileExists(cachePath) Then
+    If Not fso.FolderExists(oneDocsDir) Then
+      If SEED_TO_ONEDRIVE_IF_MISSING Then
+        On Error Resume Next
+        fso.CreateFolder oneDocsDir
+        On Error GoTo 0
+      End If
+    End If
+
+    If fso.FolderExists(oneDocsDir) And Not fso.FileExists(cloudPath) Then
+      If SEED_TO_ONEDRIVE_IF_MISSING Then
+        On Error Resume Next
+        fso.CopyFile cachePath, cloudPath, True
+        If Err.Number = 0 Then
+          If ALERT_ONEDRIVE_SEEDED Then
+            MsgBox "Template was created in OneDrive at:" & vbCrLf & cloudPath & vbCrLf & _
+                   "You can edit your template there going forward.", _
+                   vbInformation, "LoadClipSection"
+          End If
+          If OFFER_OPEN_FOLDER_ON_SEED Then
+            ws.Run "explorer.exe """ & oneDocsDir & """", 1, False
+          End If
+        Else
+          Err.Clear
+        End If
+        On Error GoTo 0
+      End If
+    End If
   End If
 
-  Dim cloudPath
-  cloudPath = oneDocsDir & "\SplitterTemplates_WithoutAvocado.txt"
-
+  ' Normal path: if cloud has a file, and it's newer than cache → copy down (hydrate if needed)
   If fso.FileExists(cloudPath) Then
     Dim doCopy
     doCopy = False
@@ -198,9 +232,9 @@ Function EnsureLocalTemplate()
 
     If doCopy Then
       On Error Resume Next
-      fso.CopyFile cloudPath, cachePath, True   ' may hydrate on first update
+      fso.CopyFile cloudPath, cachePath, True
       If Err.Number <> 0 Then
-        ' cooldown: warn at most once per period
+        ' cooldown: warn at most once per period; if no cache afterward → fail hard
         Dim sidecar, showAlert
         showAlert = True
         sidecar = cacheDir & "\.lastcopyfail"
@@ -211,7 +245,6 @@ Function EnsureLocalTemplate()
             showAlert = False
           End If
         End If
-        ' touch/update sidecar timestamp
         Dim ts
         Set ts = fso.OpenTextFile(sidecar, 2, True)
         ts.Write "fail"
@@ -221,22 +254,37 @@ Function EnsureLocalTemplate()
           MsgBox "Could not copy updated template from OneDrive (likely cloud-only or locked):" & vbCrLf & _
                  cloudPath & vbCrLf & vbCrLf & _
                  "Tip: Right-click the folder and choose 'Always keep on this device' so it's always local." & vbCrLf & _
-                 "Continuing with cached template: " & cachePath, vbInformation, "LoadClipSection"
+                 "Continuing with cached template if available.", vbInformation, "LoadClipSection"
           If OFFER_OPEN_FOLDER_ON_FAIL Then
             ws.Run "explorer.exe """ & oneDocsDir & """", 1, False
           End If
         End If
         Err.Clear
+
+        ' If we still don't have any local template, we must stop
+        If Not fso.FileExists(cachePath) Then
+          Fail "Could not retrieve a template from OneDrive and no local template exists." & vbCrLf & _
+               "Please install your template at:" & vbCrLf & cachePath
+        End If
       End If
       On Error GoTo 0
     End If
-  Else
-    If ALERT_ONEDRIVE_MISSING Then _
-      MsgBox "Template file not found in OneDrive:" & vbCrLf & cloudPath & vbCrLf & _
-             "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
+
+    EnsureLocalTemplate = cachePath
+    Exit Function
   End If
 
-  EnsureLocalTemplate = cachePath
+  ' Cloud file not present here
+  If fso.FileExists(cachePath) Then
+    ' Use local cache; we may have attempted seeding above
+    EnsureLocalTemplate = cachePath
+  Else
+    ' Hard stop: no cloud & no local
+    Fail "Template not found in OneDrive and no local template exists." & vbCrLf & _
+         "Please install your template at:" & vbCrLf & _
+         cachePath & vbCrLf & _
+         "After that, this script will seed OneDrive automatically."
+  End If
 End Function
 ' -------------------------------------------------------------------------------
 
