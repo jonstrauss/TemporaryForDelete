@@ -1,15 +1,49 @@
-' Activation targets
-Const TARGET_WINDOW_TITLE = "Result Entry -- Webpage Dialog"  ' prefix match
-
-Dim ALT_PATTERNS
-ALT_PATTERNS = Array( _
-  "^PathQuest\s*-\s*Work\s*-\s*Microsoft.*", _
-  "^PathQuest\s+and\s+\d+\s+more\s+pages?\s*-\s*Work\s*-\s*Microsoft.*" _
-)
+' True when we matched the PathQuest/Edge (" - Work - Microsoft") window
+Dim IS_ALT_WINDOW: IS_ALT_WINDOW = False
 
 
-
-' LoadClipSection.vbs - populate Micro, Comment, then Diagnosis for a given ID
+If ok Then
+  activated = True
+  IS_ALT_WINDOW = True   ' <-- mark that we’re on the PathQuest/Edge window
+  Exit For
+End If
 
 
 
+
+Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste, ByVal skipTabAfterEnter)
+  If Len(textToPaste) = 0 Then Exit Sub
+
+  ws.SendKeys "%n"                                ' Alt+N
+  WScript.Sleep WAIT_AFTER_OPEN_BOX_MS
+  ws.SendKeys label & " " & partLetter            ' e.g., "Micro A"
+  WScript.Sleep WAIT_AFTER_TYPE_LABEL_MS
+  ws.SendKeys "{ENTER}"
+  WScript.Sleep WAIT_AFTER_ENTER_MS
+
+  If Not skipTabAfterEnter Then
+    ws.SendKeys "{TAB}"
+    WScript.Sleep WAIT_AFTER_TAB_MS
+  End If
+
+  SetClipboardText textToPaste
+  If FALLBACK_FIXED_WAIT_MS > 0 Then WScript.Sleep FALLBACK_FIXED_WAIT_MS
+  If DO_PASTE Then
+    If EXTRA_WAIT_BEFORE_PASTE_MS > 0 Then WScript.Sleep EXTRA_WAIT_BEFORE_PASTE_MS
+    ws.SendKeys "^v"
+    WScript.Sleep 100
+  End If
+
+  If SCRUB_AFTER_PASTE Then
+    WScript.Sleep 150
+    SetClipboardText ""
+  End If
+
+  If WAIT_BETWEEN_SECTIONS_MS > 0 Then WScript.Sleep WAIT_BETWEEN_SECTIONS_MS
+End Sub
+
+
+
+PopulateSection "Micro", part, snMicro,   False                 ' always Tab
+PopulateSection "Comm",  part, snComment, False                 ' always Tab
+PopulateSection "Dx",    part, snDx,      IS_ALT_WINDOW         ' skip Tab only on PathQuest/Edge
