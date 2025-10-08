@@ -1,12 +1,30 @@
 
 
-If DEBUG_SHOW_ACTIVE_TITLE Then
-  Dim awt, tmsg
-  awt = GetActiveWindowTitle()
-  If Len(awt) = 0 Then
-    tmsg = "(unknown / PowerShell blocked)"
-  Else
-    tmsg = """" & awt & """"
-  End If
-  MsgBox "Active window title is:" & vbCrLf & tmsg, vbInformation, "LoadClipSection — Debug"
-End If
+' ===== Debug: log window titles to Desktop =====
+Dim dbgActive, dbgAltMatch, dbgDesk, dbgLogPath, dbgText
+dbgActive  = GetActiveWindowTitle()
+' quick scan for the alternate pattern (short timeout so it won't block)
+dbgAltMatch = ""
+If Len(ALT_TARGET_REGEX) > 0 Then dbgAltMatch = FindWindowTitleByRegex(ALT_TARGET_REGEX, 300)
+
+dbgDesk    = ws.SpecialFolders("Desktop")
+dbgLogPath = fso.BuildPath(dbgDesk, "LoadClip_window_title.txt")
+
+dbgText = "Captured at: " & Now & vbCrLf & _
+          "Active window title: " & dbgActive & vbCrLf & _
+          "Primary target prefix: " & TARGET_WINDOW_TITLE & vbCrLf & _
+          "Alt regex: " & ALT_TARGET_REGEX & vbCrLf & _
+          "Alt first match: " & dbgAltMatch & vbCrLf
+
+WriteAllUtf8 dbgLogPath, dbgText
+' ===== End debug block =====
+
+
+Dim i, codes
+codes = ""
+For i = 1 To Len(dbgActive)
+  codes = codes & Right("0000" & Hex(AscW(Mid(dbgActive, i, 1))), 4) & " "
+Next
+dbgText = dbgText & "Active title codepoints: " & codes & vbCrLf
+WriteAllUtf8 dbgLogPath, dbgText
+
