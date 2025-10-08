@@ -1,4 +1,248 @@
 # TemporaryForDelete
 
 
-This is the read me file
+' LoadClipSection.vbs — populate Micro, Comment, then Diagnosis for a given ID
+Option Explicit
+
+'==================== CONFIG ====================
+Const DO_PASTE                   = True
+Const SCRUB_AFTER_PASTE          = True
+Const DO_TRIM                    = True      ' trim leading/trailing blank lines
+Const TARGET_WINDOW_TITLE        = ""
+
+' Timing
+Const WAIT_AFTER_OPEN_BOX_MS     = 200
+Const WAIT_AFTER_TYPE_LABEL_MS   = 80
+Const WAIT_AFTER_ENTER_MS        = 120
+Const WAIT_AFTER_TAB_MS          = 80
+Const FALLBACK_FIXED_WAIT_MS     = 600
+Const EXTRA_WAIT_BEFORE_PASTE_MS = 50
+Const WAIT_BETWEEN_SECTIONS_MS   = 120
+Const DEBUG_FLAG                 = False
+
+' Alerts / guidance
+Const ALERT_ONEDRIVE_MISSING     = True      ' message if OneDrive folder/file not found
+Const ALERT_CLOUD_COPY_FAILED    = True      ' message if copy fails (likely cloud-only/locked)
+Const CLOUD_COPY_ALERT_COOLDOWN_MIN = 1440   ' show copy-fail message at most once per day
+Const OFFER_OPEN_FOLDER_ON_FAIL  = True      ' open Explorer on failure to let user pin folder
+'================================================
+
+Dim args: Set args = WScript.Arguments
+If args.Count < 1 Then Usage
+Dim id4: id4 = Pad4(args(0))
+
+Dim ws:  Set ws  = CreateObject("WScript.Shell")
+Dim fso: Set fso = CreateObject("Scripting.FileSystemObject")
+
+' ===== Resolve & cache template (OneDrive for Business → local cache) =====
+Dim TEMPLATE_PATH: TEMPLATE_PATH = EnsureLocalTemplate()
+If Not fso.FileExists(TEMPLATE_PATH) Then Fail "Template not found: " & TEMPLATE_PATH
+' ==========================================================================
+
+'-------------------- Helpers --------------------
+Sub D(s) : If DEBUG_FLAG Then MsgBox s, vbInformation, "LoadClipSection" : End If : End Sub
+
+Sub Usage()
+  MsgBox "Usage:" & vbCrLf & "  wscript LoadClipSection.vbs 0001", vbInformation, "LoadClipSection"
+  WScript.Quit 1
+End Sub
+
+Function Pad4(x)
+  Dim s: s = Trim(CStr(x))
+  If Len(s) < 4 Then s = Right("0000" & s, 4) Else s = Right(s, 4)
+  Pad4 = s
+End Function
+
+Function ReadAllUtf8(p)
+  Dim st: Set st = CreateObject("ADODB.Stream")
+  st.Type = 2 : st.Charset = "utf-8" : st.Open
+  st.LoadFromFile p
+  ReadAllUtf8 = st.ReadText
+  st.Close
+End Function
+
+Sub WriteAllUtf8(p, s)
+  If IsNull(s) Then s = ""
+  Dim st: Set st = CreateObject("ADODB.Stream")
+  st.Type = 2 : st.Charset = "utf-8" : st.Open
+  st.WriteText s
+  st.Position = 0
+  st.SaveToFile p, 2
+  st.Close
+End Sub
+
+Sub SetClipboardText(s)
+  If IsNull(s) Then s = ""
+  Dim tf, cmd
+  tf = fso.BuildPath(ws.ExpandEnvironmentStrings("%TEMP%"), "clip_set.txt")
+  WriteAllUtf8 tf, s
+  cmd = "%ComSpec% /c chcp 65001>nul & type """ & tf & """ | clip"
+  ws.Run cmd, 0, True
+  On Error Resume Next: fso.DeleteFile tf, True: On Error GoTo 0
+End Sub
+
+Function TrimCRLF(s)
+  Dim t: t = s
+  Do While Len(t) > 0 And InStr(1, " " & vbTab & vbCr & vbLf, Left(t,1), vbBinaryCompare) > 0
+    t = Mid(t,2)
+  Loop
+  Do While Len(t) > 0 And InStr(1, " " & vbTab & vbCr & vbLf, Right(t,1), vbBinaryCompare) > 0
+    t = Left(t,Len(t)-1)
+  Loop
+  TrimCRLF = t
+End Function
+
+Function GetSection(ByVal content, ByVal prefix, ByVal id4)
+  Dim startTag: startTag = "#" & prefix & "_" & id4 & "#"
+  Dim endTag:   endTag   = "#END " & prefix & "_" & id4 & "#"
+  Dim p1: p1 = InStr(1, content, startTag, vbTextCompare)
+  If p1 = 0 Then GetSection = "" : Exit Function
+  p1 = p1 + Len(startTag)
+  Dim p2: p2 = InStr(p1, content, endTag, vbTextCompare)
+  If p2 = 0 Then GetSection = "" : Exit Function
+  Dim s: s = Mid(content, p1, p2 - p1)
+  If DO_TRIM Then s = TrimCRLF(s)
+  GetSection = s
+End Function
+
+Sub Fail(msg)
+  MsgBox "[LoadClipSection] " & msg, vbCritical, "LoadClipSection"
+  WScript.Quit 2
+End Sub
+
+Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
+  If Len(textToPaste) = 0 Then D "Skip " & label & " — no snippet for " & id4 : Exit Sub
+  ws.SendKeys "%n"                                ' Alt+N
+  WScript.Sleep WAIT_AFTER_OPEN_BOX_MS
+  ws.SendKeys label & " " & partLetter            ' e.g., "Micro A"
+  WScript.Sleep WAIT_AFTER_TYPE_LABEL_MS
+  ws.SendKeys "{ENTER}"
+  WScript.Sleep WAIT_AFTER_ENTER_MS
+  ws.SendKeys "{TAB}"
+  WScript.Sleep WAIT_AFTER_TAB_MS
+  SetClipboardText textToPaste
+  If FALLBACK_FIXED_WAIT_MS > 0 Then WScript.Sleep FALLBACK_FIXED_WAIT_MS
+  If DO_PASTE Then
+    If EXTRA_WAIT_BEFORE_PASTE_MS > 0 Then WScript.Sleep EXTRA_WAIT_BEFORE_PASTE_MS
+    ws.SendKeys "^v"
+    WScript.Sleep 100
+  End If
+  If SCRUB_AFTER_PASTE Then
+    WScript.Sleep 150
+    SetClipboardText ""
+  End If
+  If WAIT_BETWEEN_SECTIONS_MS > 0 Then WScript.Sleep WAIT_BETWEEN_SECTIONS_MS
+End Sub
+
+' ----- OneDriveBusiness → local cache (copy if cloud newer) + alerts/cooldown -----
+Function EnsureLocalTemplate()
+  Dim appData, localDir, localPath
+  appData  = ws.ExpandEnvironmentStrings("%APPDATA%")
+  localDir = appData & "\JSS_SplitterWithoutAvocado"
+  If Not fso.FolderExists(localDir) Then On Error Resume Next: fso.CreateFolder localDir: On Error GoTo 0
+  localPath = localDir & "\SplitterTemplates_WithoutAvocado.txt"
+
+  ' OneDrive for Business root (tenant-branded)
+  Dim odBizRoot: odBizRoot = ws.ExpandEnvironmentStrings("%OneDriveCommercial%")
+  If Len(odBizRoot) = 0 Then
+    If ALERT_ONEDRIVE_MISSING Then _
+      MsgBox "OneDrive for Business is not available on this profile." & vbCrLf & _
+             "Using cached template: " & localPath, vbExclamation, "LoadClipSection"
+    EnsureLocalTemplate = localPath
+    Exit Function
+  End If
+
+  Dim cloudFolder: cloudFolder
+  cloudFolder = odBizRoot & "\Documents\JSS_SplitterWithoutAvocado"
+  If Not fso.FolderExists(cloudFolder) Then
+    If ALERT_ONEDRIVE_MISSING Then _
+      MsgBox "Expected template folder not found:" & vbCrLf & cloudFolder & vbCrLf & _
+             "Using cached template: " & localPath, vbExclamation, "LoadClipSection"
+    EnsureLocalTemplate = localPath
+    Exit Function
+  End If
+
+  Dim cloudPath: cloudPath
+  cloudPath = cloudFolder & "\SplitterTemplates_WithoutAvocado.txt"
+
+  If fso.FileExists(cloudPath) Then
+    Dim doCopy: doCopy = False
+    If Not fso.FileExists(localPath) Then
+      doCopy = True
+    Else
+      Dim fl, fc: Set fl = fso.GetFile(localPath): Set fc = fso.GetFile(cloudPath)
+      If fc.DateLastModified > fl.DateLastModified Then doCopy = True
+    End If
+
+    If doCopy Then
+      On Error Resume Next
+      fso.CopyFile cloudPath, localPath, True   ' may hydrate on first update
+      If Err.Number <> 0 Then
+        ' cooldown sidecar: show at most once per period
+        Dim sidecar, showAlert: showAlert = True
+        sidecar = localDir & "\.lastcopyfail"
+        On Error Resume Next
+        If fso.FileExists(sidecar) Then
+          Dim scf: Set scf = fso.GetFile(sidecar)
+          If DateDiff("n", scf.DateLastModified, Now) < CLOUD_COPY_ALERT_COOLDOWN_MIN Then
+            showAlert = False
+          End If
+        End If
+        ' touch/update sidecar timestamp
+        Dim ts: Set ts = fso.OpenTextFile(sidecar, 2, True)
+        ts.Write "fail": ts.Close
+
+        If ALERT_CLOUD_COPY_FAILED And showAlert Then
+          MsgBox "Could not copy updated template from OneDrive (likely cloud-only or locked):" & vbCrLf & _
+                 cloudPath & vbCrLf & vbCrLf & _
+                 "Tip: Right-click the folder and choose 'Always keep on this device' so it's always local." & vbCrLf & _
+                 "Continuing with cached template: " & localPath, vbInformation, "LoadClipSection"
+          If OFFER_OPEN_FOLDER_ON_FAIL Then
+            ws.Run "explorer.exe """ & cloudFolder & """", 1, False
+          End If
+        End If
+        Err.Clear
+      End If
+      On Error GoTo 0
+    End If
+  Else
+    If ALERT_ONEDRIVE_MISSING Then _
+      MsgBox "Template file not found in OneDrive:" & vbCrLf & cloudPath & vbCrLf & _
+             "Using cached template: " & localPath, vbExclamation, "LoadClipSection"
+  End If
+
+  EnsureLocalTemplate = localPath
+End Function
+' -------------------------------------------------------------------------------
+
+'-------------------- Main --------------------
+Dim content: content = ReadAllUtf8(TEMPLATE_PATH)
+
+Dim snMicro, snComment, snDx
+snMicro   = GetSection(content, "MICRO",     id4)
+snComment = GetSection(content, "COMMENT",   id4)
+snDx      = GetSection(content, "DIAGNOSIS", id4)
+
+If Len(snMicro) = 0 And Len(snComment) = 0 And Len(snDx) = 0 Then
+  Fail "No sections found for ID " & id4 & ". Check your markers."
+End If
+
+Dim part, ttl
+ttl = "LoadClipSection — Choose Part"
+Do
+  part = InputBox("Enter part letter (A–Z):", ttl, "A")
+  If StrComp(part, "", vbBinaryCompare) = 0 Then WScript.Quit 0 ' Cancel
+  part = UCase(Trim(part))
+Loop Until (Len(part) = 1 And Asc(part) >= 65 And Asc(part) <= 90)
+
+If Len(TARGET_WINDOW_TITLE) > 0 Then
+  On Error Resume Next: ws.AppActivate TARGET_WINDOW_TITLE: On Error GoTo 0
+  WScript.Sleep 100
+End If
+
+PopulateSection "Micro", part, snMicro
+PopulateSection "Comm",  part, snComment
+PopulateSection "Dx",    part, snDx
+
+WScript.Quit 0
+
