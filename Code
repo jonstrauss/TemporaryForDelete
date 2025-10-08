@@ -1,30 +1,10 @@
 
 
-' ===== Debug: log window titles to Desktop =====
-Dim dbgActive, dbgAltMatch, dbgDesk, dbgLogPath, dbgText
-dbgActive  = GetActiveWindowTitle()
-' quick scan for the alternate pattern (short timeout so it won't block)
-dbgAltMatch = ""
-If Len(ALT_TARGET_REGEX) > 0 Then dbgAltMatch = FindWindowTitleByRegex(ALT_TARGET_REGEX, 300)
+Captured at: 10/7/2025 10:24:15 PM
+Active window title: PathQuest - Work - Microsoft? Edge
 
-dbgDesk    = ws.SpecialFolders("Desktop")
-dbgLogPath = fso.BuildPath(dbgDesk, "LoadClip_window_title.txt")
+Primary target prefix: Result Entry -- Webpage Dialog
+Alt regex: ^PathQuest.+- Work - Microsoft.*
+Alt first match: PathQuest - Work - Microsoft? Edge
 
-dbgText = "Captured at: " & Now & vbCrLf & _
-          "Active window title: " & dbgActive & vbCrLf & _
-          "Primary target prefix: " & TARGET_WINDOW_TITLE & vbCrLf & _
-          "Alt regex: " & ALT_TARGET_REGEX & vbCrLf & _
-          "Alt first match: " & dbgAltMatch & vbCrLf
-
-WriteAllUtf8 dbgLogPath, dbgText
-' ===== End debug block =====
-
-
-Dim i, codes
-codes = ""
-For i = 1 To Len(dbgActive)
-  codes = codes & Right("0000" & Hex(AscW(Mid(dbgActive, i, 1))), 4) & " "
-Next
-dbgText = dbgText & "Active title codepoints: " & codes & vbCrLf
-WriteAllUtf8 dbgLogPath, dbgText
-
+Active title codepoints: 0050 0061 0074 0068 0051 0075 0065 0073 0074 0020 002D 0020 0057 006F 0072 006B 0020 002D 0020 004D 0069 0063 0072 006F 0073 006F 0066 0074 003F 0020 0045 0064 0067 0065 000D 000A 
