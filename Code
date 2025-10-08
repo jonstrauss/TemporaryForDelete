@@ -5,7 +5,7 @@ Option Explicit
 Const DO_PASTE                   = True
 Const SCRUB_AFTER_PASTE          = True
 Const DO_TRIM                    = True      ' trim leading/trailing blank lines
-Const TARGET_WINDOW_TITLE        = ""
+Const TARGET_WINDOW_TITLE        = "Epic Hyperspace"
 
 ' Timing
 Const WAIT_AFTER_OPEN_BOX_MS     = 200
@@ -27,6 +27,13 @@ Const OFFER_OPEN_FOLDER_ON_FAIL  = True      ' open Explorer on failure to let u
 Const SEED_TO_ONEDRIVE_IF_MISSING = True     ' create folder/file in OneDrive from LOCAL cache
 Const ALERT_ONEDRIVE_SEEDED       = True     ' notify when we seed the template
 Const OFFER_OPEN_FOLDER_ON_SEED   = True     ' open Explorer to the folder after seeding
+
+' --- Activation + debug ---
+Const REQUIRE_ACTIVATE           = True   ' stop if we can't activate the target
+Const ACTIVATE_TIMEOUT_MS        = 2000   ' try for up to 2 seconds
+Const ACTIVATE_RETRY_INTERVAL_MS = 100    ' retry every 100 ms
+Const ACTIVATE_ALT_NUDGE         = True   ' send lone ALT to allow foreground switch
+Const DEBUG_SHOW_ACTIVE_TITLE    = True   ' show current active window title at start
 '================================================
 
 Dim args: Set args = WScript.Arguments
@@ -77,6 +84,12 @@ Sub WriteAllUtf8(p, s)
   st.Close
 End Sub
 
+Sub EnsureFileExistsEmpty(p)
+  If Not fso.FileExists(p) Then
+    WriteAllUtf8 p, ""
+  End If
+End Sub
+
 Sub SetClipboardText(s)
   If IsNull(s) Then s = ""
   Dim tf, cmd
@@ -118,6 +131,49 @@ Sub Fail(msg)
   MsgBox "[LoadClipSection] " & msg, vbCritical, "LoadClipSection"
   WScript.Quit 2
 End Sub
+
+' --- Debug: get the CURRENT active window title (hidden PowerShell) ---
+Function GetActiveWindowTitle()
+  On Error Resume Next
+  Dim tf, ps, ex, out
+  tf = fso.BuildPath(ws.ExpandEnvironmentStrings("%TEMP%"), "get_active_title.ps1")
+  ps = "$code = @'" & vbCrLf & _
+       "using System;" & vbCrLf & _
+       "using System.Text;" & vbCrLf & _
+       "using System.Runtime.InteropServices;" & vbCrLf & _
+       "public static class FgWin {" & vbCrLf & _
+       " [DllImport(""user32.dll"")] public static extern IntPtr GetForegroundWindow();" & vbCrLf & _
+       " [DllImport(""user32.dll"", CharSet=CharSet.Auto, SetLastError=true)]" & vbCrLf & _
+       " public static extern int GetWindowText(IntPtr hWnd, StringBuilder sb, int maxCount);" & vbCrLf & _
+       "}" & vbCrLf & _
+       "'@" & vbCrLf & _
+       "Add-Type -TypeDefinition $code" & vbCrLf & _
+       "$h=[FgWin]::GetForegroundWindow()" & vbCrLf & _
+       "$sb=New-Object System.Text.StringBuilder 1024" & vbCrLf & _
+       "[FgWin]::GetWindowText($h,$sb,$sb.Capacity) | Out-Null" & vbCrLf & _
+       "$sb.ToString()"
+  WriteAllUtf8 tf, ps
+  Set ex = ws.Exec("powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & tf & """")
+  out = ex.StdOut.ReadAll
+  GetActiveWindowTitle = Trim(out)
+  On Error Resume Next
+  fso.DeleteFile tf, True
+  On Error GoTo 0
+End Function
+
+' --- Try to activate a window by (prefix) title with retries ---
+Function TryActivateWindow(ByVal title, ByVal timeoutMs)
+  Dim tEnd: tEnd = DateAdd("s", timeoutMs/1000, Now)
+  Do
+    If ws.AppActivate(title) Then
+      TryActivateWindow = True
+      Exit Function
+    End If
+    If ACTIVATE_ALT_NUDGE Then ws.SendKeys "%"
+    WScript.Sleep ACTIVATE_RETRY_INTERVAL_MS
+  Loop While Now < tEnd
+  TryActivateWindow = False
+End Function
 
 Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
   If Len(textToPaste) = 0 Then
@@ -276,10 +332,8 @@ Function EnsureLocalTemplate()
 
   ' Cloud file not present here
   If fso.FileExists(cachePath) Then
-    ' Use local cache; we may have attempted seeding above
     EnsureLocalTemplate = cachePath
   Else
-    ' Hard stop: no cloud & no local
     Fail "Template not found in OneDrive and no local template exists." & vbCrLf & _
          "Please install your template at:" & vbCrLf & _
          cachePath & vbCrLf & _
@@ -289,6 +343,32 @@ End Function
 ' -------------------------------------------------------------------------------
 
 '-------------------- Main --------------------
+' Optional debug: show what window currently has focus (helps you find the right title prefix)
+If DEBUG_SHOW_ACTIVE_TITLE Then
+  Dim awt, dbgMsg
+  awt = GetActiveWindowTitle()
+  If Len(awt) = 0 Then
+    dbgMsg = "Active window title is:" & vbCrLf & "(unknown / PowerShell blocked)"
+  Else
+    dbgMsg = "Active window title is:" & vbCrLf & """" & awt & """"
+  End If
+  MsgBox dbgMsg, vbInformation, "LoadClipSection — Debug"
+End If
+
+If Len(TARGET_WINDOW_TITLE) > 0 Then
+  If Not TryActivateWindow(TARGET_WINDOW_TITLE, ACTIVATE_TIMEOUT_MS) Then
+    If REQUIRE_ACTIVATE Then
+      MsgBox "Couldn't activate a window whose title begins with:" & vbCrLf & _
+             """" & TARGET_WINDOW_TITLE & """" & vbCrLf & vbCrLf & _
+             "Tip: Use a stable prefix of the parent window (e.g., the EMR app name), " & _
+             "not text inside a modal web dialog.", vbExclamation, "LoadClipSection"
+      WScript.Quit 3
+    End If
+  Else
+    WScript.Sleep 100
+  End If
+End If
+
 Dim content: content = ReadAllUtf8(TEMPLATE_PATH)
 
 Dim snMicro, snComment, snDx
@@ -307,13 +387,6 @@ Do
   If StrComp(part, "", vbBinaryCompare) = 0 Then WScript.Quit 0 ' Cancel
   part = UCase(Trim(part))
 Loop Until (Len(part) = 1 And Asc(part) >= 65 And Asc(part) <= 90)
-
-If Len(TARGET_WINDOW_TITLE) > 0 Then
-  On Error Resume Next
-  ws.AppActivate TARGET_WINDOW_TITLE
-  On Error GoTo 0
-  WScript.Sleep 100
-End If
 
 PopulateSection "Micro", part, snMicro
 PopulateSection "Comm",  part, snComment
