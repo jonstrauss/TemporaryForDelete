@@ -46,7 +46,11 @@ End Sub
 
 Function Pad4(x)
   Dim s: s = Trim(CStr(x))
-  If Len(s) < 4 Then s = Right("0000" & s, 4) Else s = Right(s, 4)
+  If Len(s) < 4 Then
+    s = Right("0000" & s, 4)
+  Else
+    s = Right(s, 4)
+  End If
   Pad4 = s
 End Function
 
@@ -75,7 +79,9 @@ Sub SetClipboardText(s)
   WriteAllUtf8 tf, s
   cmd = "%ComSpec% /c chcp 65001>nul & type """ & tf & """ | clip"
   ws.Run cmd, 0, True
-  On Error Resume Next: fso.DeleteFile tf, True: On Error GoTo 0
+  On Error Resume Next
+  fso.DeleteFile tf, True
+  On Error GoTo 0
 End Sub
 
 Function TrimCRLF(s)
@@ -90,14 +96,15 @@ Function TrimCRLF(s)
 End Function
 
 Function GetSection(ByVal content, ByVal prefix, ByVal id4)
-  Dim startTag: startTag = "#" & prefix & "_" & id4 & "#"
-  Dim endTag:   endTag   = "#END " & prefix & "_" & id4 & "#"
-  Dim p1: p1 = InStr(1, content, startTag, vbTextCompare)
+  Dim startTag, endTag, p1, p2, s
+  startTag = "#" & prefix & "_" & id4 & "#"
+  endTag   = "#END " & prefix & "_" & id4 & "#"
+  p1 = InStr(1, content, startTag, vbTextCompare)
   If p1 = 0 Then GetSection = "" : Exit Function
   p1 = p1 + Len(startTag)
-  Dim p2: p2 = InStr(p1, content, endTag, vbTextCompare)
+  p2 = InStr(p1, content, endTag, vbTextCompare)
   If p2 = 0 Then GetSection = "" : Exit Function
-  Dim s: s = Mid(content, p1, p2 - p1)
+  s = Mid(content, p1, p2 - p1)
   If DO_TRIM Then s = TrimCRLF(s)
   GetSection = s
 End Function
@@ -108,7 +115,11 @@ Sub Fail(msg)
 End Sub
 
 Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
-  If Len(textToPaste) = 0 Then D "Skip " & label & " — no snippet for " & id4 : Exit Sub
+  If Len(textToPaste) = 0 Then
+    D "Skip " & label & " — no snippet for " & id4
+    Exit Sub
+  End If
+
   ws.SendKeys "%n"                                ' Alt+N
   WScript.Sleep WAIT_AFTER_OPEN_BOX_MS
   ws.SendKeys label & " " & partLetter            ' e.g., "Micro A"
@@ -117,6 +128,7 @@ Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
   WScript.Sleep WAIT_AFTER_ENTER_MS
   ws.SendKeys "{TAB}"
   WScript.Sleep WAIT_AFTER_TAB_MS
+
   SetClipboardText textToPaste
   If FALLBACK_FIXED_WAIT_MS > 0 Then WScript.Sleep FALLBACK_FIXED_WAIT_MS
   If DO_PASTE Then
@@ -124,78 +136,94 @@ Sub PopulateSection(ByVal label, ByVal partLetter, ByVal textToPaste)
     ws.SendKeys "^v"
     WScript.Sleep 100
   End If
+
   If SCRUB_AFTER_PASTE Then
     WScript.Sleep 150
     SetClipboardText ""
   End If
+
   If WAIT_BETWEEN_SECTIONS_MS > 0 Then WScript.Sleep WAIT_BETWEEN_SECTIONS_MS
 End Sub
 
 ' ----- OneDriveBusiness → local cache (copy if cloud newer) + alerts/cooldown -----
 Function EnsureLocalTemplate()
-  Dim appData, localDir, localPath
+  Dim appData, cacheDir, cachePath
   appData  = ws.ExpandEnvironmentStrings("%APPDATA%")
-  localDir = appData & "\JSS_SplitterWithoutAvocado"
-  If Not fso.FolderExists(localDir) Then On Error Resume Next: fso.CreateFolder localDir: On Error GoTo 0
-  localPath = localDir & "\SplitterTemplates_WithoutAvocado.txt"
+  cacheDir = appData & "\JSS_SplitterWithoutAvocado"
+  If Not fso.FolderExists(cacheDir) Then
+    On Error Resume Next
+    fso.CreateFolder cacheDir
+    On Error GoTo 0
+  End If
+  cachePath = cacheDir & "\SplitterTemplates_WithoutAvocado.txt"
 
-  ' OneDrive for Business root (tenant-branded)
-  Dim odBizRoot: odBizRoot = ws.ExpandEnvironmentStrings("%OneDriveCommercial%")
-  If Len(odBizRoot) = 0 Then
+  ' Resolve OneDrive for Business root
+  Dim odBizRoot
+  odBizRoot = ws.ExpandEnvironmentStrings("%OneDriveCommercial%")
+
+  ' Treat missing/unevaluated env var as unavailable
+  If Len(odBizRoot) = 0 Or InStr(odBizRoot, "%OneDriveCommercial%") > 0 Then
     If ALERT_ONEDRIVE_MISSING Then _
-      MsgBox "OneDrive for Business is not available on this profile." & vbCrLf & _
-             "Using cached template: " & localPath, vbExclamation, "LoadClipSection"
-    EnsureLocalTemplate = localPath
+      MsgBox "OneDrive for Business is not available for this profile." & vbCrLf & _
+             "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
+    EnsureLocalTemplate = cachePath
     Exit Function
   End If
 
-  Dim cloudFolder: cloudFolder
-  cloudFolder = odBizRoot & "\Documents\JSS_SplitterWithoutAvocado"
-  If Not fso.FolderExists(cloudFolder) Then
+  ' Expected Documents\JSS_SplitterWithoutAvocado under the OneDrive business root
+  Dim oneDocsDir
+  oneDocsDir = odBizRoot & "\Documents\JSS_SplitterWithoutAvocado"
+  If Not fso.FolderExists(oneDocsDir) Then
     If ALERT_ONEDRIVE_MISSING Then _
-      MsgBox "Expected template folder not found:" & vbCrLf & cloudFolder & vbCrLf & _
-             "Using cached template: " & localPath, vbExclamation, "LoadClipSection"
-    EnsureLocalTemplate = localPath
+      MsgBox "Expected template folder not found:" & vbCrLf & oneDocsDir & vbCrLf & _
+             "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
+    EnsureLocalTemplate = cachePath
     Exit Function
   End If
 
-  Dim cloudPath: cloudPath
-  cloudPath = cloudFolder & "\SplitterTemplates_WithoutAvocado.txt"
+  Dim cloudPath
+  cloudPath = oneDocsDir & "\SplitterTemplates_WithoutAvocado.txt"
 
   If fso.FileExists(cloudPath) Then
-    Dim doCopy: doCopy = False
-    If Not fso.FileExists(localPath) Then
+    Dim doCopy
+    doCopy = False
+    If Not fso.FileExists(cachePath) Then
       doCopy = True
     Else
-      Dim fl, fc: Set fl = fso.GetFile(localPath): Set fc = fso.GetFile(cloudPath)
+      Dim fl, fc
+      Set fl = fso.GetFile(cachePath)
+      Set fc = fso.GetFile(cloudPath)
       If fc.DateLastModified > fl.DateLastModified Then doCopy = True
     End If
 
     If doCopy Then
       On Error Resume Next
-      fso.CopyFile cloudPath, localPath, True   ' may hydrate on first update
+      fso.CopyFile cloudPath, cachePath, True   ' may hydrate on first update
       If Err.Number <> 0 Then
-        ' cooldown sidecar: show at most once per period
-        Dim sidecar, showAlert: showAlert = True
-        sidecar = localDir & "\.lastcopyfail"
-        On Error Resume Next
+        ' cooldown: warn at most once per period
+        Dim sidecar, showAlert
+        showAlert = True
+        sidecar = cacheDir & "\.lastcopyfail"
         If fso.FileExists(sidecar) Then
-          Dim scf: Set scf = fso.GetFile(sidecar)
+          Dim scf
+          Set scf = fso.GetFile(sidecar)
           If DateDiff("n", scf.DateLastModified, Now) < CLOUD_COPY_ALERT_COOLDOWN_MIN Then
             showAlert = False
           End If
         End If
         ' touch/update sidecar timestamp
-        Dim ts: Set ts = fso.OpenTextFile(sidecar, 2, True)
-        ts.Write "fail": ts.Close
+        Dim ts
+        Set ts = fso.OpenTextFile(sidecar, 2, True)
+        ts.Write "fail"
+        ts.Close
 
         If ALERT_CLOUD_COPY_FAILED And showAlert Then
           MsgBox "Could not copy updated template from OneDrive (likely cloud-only or locked):" & vbCrLf & _
                  cloudPath & vbCrLf & vbCrLf & _
                  "Tip: Right-click the folder and choose 'Always keep on this device' so it's always local." & vbCrLf & _
-                 "Continuing with cached template: " & localPath, vbInformation, "LoadClipSection"
+                 "Continuing with cached template: " & cachePath, vbInformation, "LoadClipSection"
           If OFFER_OPEN_FOLDER_ON_FAIL Then
-            ws.Run "explorer.exe """ & cloudFolder & """", 1, False
+            ws.Run "explorer.exe """ & oneDocsDir & """", 1, False
           End If
         End If
         Err.Clear
@@ -205,10 +233,10 @@ Function EnsureLocalTemplate()
   Else
     If ALERT_ONEDRIVE_MISSING Then _
       MsgBox "Template file not found in OneDrive:" & vbCrLf & cloudPath & vbCrLf & _
-             "Using cached template: " & localPath, vbExclamation, "LoadClipSection"
+             "Using cached template: " & cachePath, vbExclamation, "LoadClipSection"
   End If
 
-  EnsureLocalTemplate = localPath
+  EnsureLocalTemplate = cachePath
 End Function
 ' -------------------------------------------------------------------------------
 
@@ -233,7 +261,9 @@ Do
 Loop Until (Len(part) = 1 And Asc(part) >= 65 And Asc(part) <= 90)
 
 If Len(TARGET_WINDOW_TITLE) > 0 Then
-  On Error Resume Next: ws.AppActivate TARGET_WINDOW_TITLE: On Error GoTo 0
+  On Error Resume Next
+  ws.AppActivate TARGET_WINDOW_TITLE
+  On Error GoTo 0
   WScript.Sleep 100
 End If
 
